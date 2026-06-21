@@ -27,6 +27,30 @@ class AccountStatus(Enum):
         }[self.value]
 
 
+# ── Page-type detection lists ────────────────────────────
+
+LOGIN_PHRASES = [
+    "log in to instagram",
+    "log in to see",
+    "please log in",
+    "sign in to instagram",
+    "login",
+    "log in",
+]
+
+CHALLENGE_PHRASES = [
+    "please wait a few minutes",
+    "too many requests",
+    "unusual activity",
+    "challenge required",
+    "blocked",
+    "captcha",
+    "security check",
+    "confirm you're not a robot",
+    "we've detected unusual activity",
+    "we limit how often",
+]
+
 BAN_PHRASES = [
     "this account has been suspended",
     "this account has been disabled",
@@ -51,17 +75,31 @@ NOT_FOUND_PHRASES = [
     "this page isn't available",
 ]
 
+PROFILE_SIGNALS = [
+    '"username"',
+    '"full_name"',
+    '"biography"',
+    '"profile_pic_url"',
+    '"edge_owner_to_timeline_media"',
+    '"is_verified"',
+    '"followed_by"',
+    '"profile_page"',
+    'og:title',
+    'og:description',
+    'instagram://user',
+]
+
 
 async def check_account(username: str) -> tuple[AccountStatus, str]:
-    """
-    Check an Instagram account's status.
+    """Check an Instagram account's status.
 
-    Detection priority:
-      1. Direct ban/suspension text on the page
-      2. "Not found" / 404
-      3. Page title analysis (profile title vs generic title)
-      4. Verified badge check
-      5. Default: active
+    Detection flow:
+      1. Login / challenge wall  → ERROR
+      2. Ban / suspension text   → SUSPENDED
+      3. Not found / 404         → NOT_FOUND
+      4. Profile data present?   → continue; else SUSPENDED
+      5. Verified badge          → VERIFIED
+      6. Default                 → ACTIVE
     """
     url = f"https://www.instagram.com/{username}/"
     headers = {
@@ -81,15 +119,24 @@ async def check_account(username: str) -> tuple[AccountStatus, str]:
                 text = await resp.text()
                 lowered = text.lower()
 
-                # 1. Explicit ban / suspension text
+                # 1. Login / challenge walls → we can't verify anything
+                for phrase in LOGIN_PHRASES:
+                    if phrase in lowered:
+                        logger.info("Login wall for %s", username)
+                        return AccountStatus.ERROR, "Login required to view profile"
+
+                for phrase in CHALLENGE_PHRASES:
+                    if phrase in lowered:
+                        logger.info("Challenge/rate-limit for %s", username)
+                        return AccountStatus.ERROR, "Rate-limited or challenge required"
+
+                # 2. Ban / suspension text
                 for phrase in BAN_PHRASES:
                     if phrase in lowered:
-                        logger.info(
-                            "Ban phrase matched for %s: %r", username, phrase
-                        )
+                        logger.info("Ban phrase for %s: %r", username, phrase)
                         return AccountStatus.SUSPENDED, f"Detected: {phrase}"
 
-                # 2. Not found / 404
+                # 3. Not found / 404
                 for phrase in NOT_FOUND_PHRASES:
                     if phrase in lowered:
                         return AccountStatus.NOT_FOUND, "Page not found"
@@ -97,19 +144,18 @@ async def check_account(username: str) -> tuple[AccountStatus, str]:
                 if resp.status == 404:
                     return AccountStatus.NOT_FOUND, "Page returned 404"
 
-                # 3. Page title analysis
+                # 4. Multi-signal profile detection
                 title = _extract_title(text)
-                if title and not _title_has_username(title, username):
+                if not _profile_loaded(text, lowered, title, username):
                     logger.info(
-                        "Profile not loaded for %s (title=%r)",
+                        "No profile data for %s (title=%r, status=%d)",
                         username,
-                        title[:80],
+                        title[:80] if title else None,
+                        resp.status,
                     )
-                    return AccountStatus.SUSPENDED, (
-                        f"Profile not loaded (title: {title[:80]})"
-                    )
+                    return AccountStatus.SUSPENDED, "Account restricted or page format unrecognised"
 
-                # 4. Verified badge
+                # 5. Verified badge
                 if re.search(r'"is_verified"\s*:\s*true', lowered):
                     return AccountStatus.VERIFIED, "Account is verified"
 
@@ -123,37 +169,45 @@ async def check_account(username: str) -> tuple[AccountStatus, str]:
             return AccountStatus.ERROR, str(e)
 
 
+# ── Helpers ──────────────────────────────────────────────
+
 def _extract_title(html: str) -> str | None:
     match = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return None
+    return match.group(1).strip() if match else None
 
 
 def _title_has_username(title: str, username: str) -> bool:
-    """
-    Check whether the HTML <title> indicates a real profile loaded.
+    """Check whether the page <title> belongs to a real profile."""
+    lt = title.lower()
+    lu = username.lower()
 
-    A normal profile title looks like:
-        "User (@user) • Instagram photos and videos"
+    if lu in lt:
+        return True
+    if "@" in lt:
+        return True
+    if "." in lu and lu.replace(".", "") in lt:
+        return True
+    return False
 
-    Error / restriction pages have a generic title like:
-        "Instagram" or "Instagram • Help Center"
-    """
-    lower_title = title.lower()
-    lower_user = username.lower()
 
-    # Direct username hit
-    if lower_user in lower_title:
+def _profile_loaded(text: str, lowered: str, title: str | None, username: str) -> bool:
+    """Return True if the page actually contains profile data for *username*."""
+
+    # Signal A — title contains the username or an @-handle
+    if title and _title_has_username(title, username):
         return True
 
-    # Title contains @ — likely a profile with a different canonical name
-    if "@" in lower_title:
+    # Signal B — username appears in the page body
+    if username.lower() in lowered:
         return True
 
-    # Instagram normalises dots out of usernames, so 'user.name'
-    # redirects to the canonical profile (title has 'username' not 'user.name').
-    if "." in lower_user and lower_user.replace(".", "") in lower_title:
+    # Signal C — common profile JSON keys are present
+    for sig in PROFILE_SIGNALS:
+        if sig in lowered:
+            return True
+
+    # Signal D — the HTTP response has Instagram profile meta
+    if "profile" in lowered and ("instagram" in lowered or username.lower() in lowered):
         return True
 
     return False
