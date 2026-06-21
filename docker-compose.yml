@@ -1,0 +1,10 @@
+services:
+  insta-monitor:
+    build: .
+    container_name: instagram-ban-monitor
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./monitored_accounts.json:/app/monitored_accounts.json
