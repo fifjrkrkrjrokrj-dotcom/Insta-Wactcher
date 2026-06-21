@@ -1,70 +1,71 @@
-import json
 import os
 from datetime import datetime
 
-DATA_FILE = "monitored_accounts.json"
+from dotenv import load_dotenv
+from motor.motor_asyncio import AsyncIOMotorClient
+
+load_dotenv()
+
+MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+_client = AsyncIOMotorClient(MONGODB_URI)
+_db = _client.insta_monitor
+collection = _db.accounts
 
 
-def _ensure_user(data: dict, chat_id: str) -> dict:
-    if chat_id not in data:
-        data[chat_id] = {"accounts": {}, "settings": {}}
-    user = data[chat_id]
-    if "accounts" not in user:
-        user["accounts"] = {}
-    if "settings" not in user:
-        user["settings"] = {}
-    return user
+async def load() -> dict:
+    result = {}
+    async for doc in collection.find():
+        result[doc["chat_id"]] = {
+            "accounts": doc.get("accounts", {}),
+            "settings": doc.get("settings", {}),
+        }
+    return result
 
 
-def load() -> dict:
-    if not os.path.exists(DATA_FILE):
-        return {}
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return {}
+async def get_accounts(chat_id: str) -> dict:
+    doc = await collection.find_one({"chat_id": chat_id})
+    return doc.get("accounts", {}) if doc else {}
 
 
-def save(data: dict) -> None:
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+async def update_account_status(chat_id: str, username: str, status: str) -> None:
+    await collection.update_one(
+        {"chat_id": chat_id},
+        {
+            "$set": {
+                f"accounts.{username}": {
+                    "status": status,
+                    "last_checked": datetime.now().isoformat(),
+                }
+            }
+        },
+        upsert=True,
+    )
 
 
-def get_accounts(chat_id: str) -> dict:
-    data = load()
-    user = data.get(chat_id, {})
-    return user.get("accounts", {})
-
-
-def update_account_status(chat_id: str, username: str, status: str) -> None:
-    data = load()
-    user = _ensure_user(data, chat_id)
-    user["accounts"][username] = {
-        "status": status,
-        "last_checked": datetime.now().isoformat(),
-    }
-    save(data)
-
-
-def remove_account(chat_id: str, username: str) -> bool:
-    data = load()
-    user = data.get(chat_id)
-    if user and username in user.get("accounts", {}):
-        del user["accounts"][username]
-        save(data)
+async def remove_account(chat_id: str, username: str) -> bool:
+    doc = await collection.find_one({"chat_id": chat_id})
+    if doc and username in doc.get("accounts", {}):
+        await collection.update_one(
+            {"chat_id": chat_id},
+            {"$unset": {f"accounts.{username}": ""}},
+        )
+        doc = await collection.find_one({"chat_id": chat_id})
+        if doc and not doc.get("accounts"):
+            await collection.delete_one({"chat_id": chat_id})
         return True
     return False
 
 
-def get_setting(chat_id: str, key: str, default=None):
-    data = load()
-    user = data.get(chat_id, {})
-    return user.get("settings", {}).get(key, default)
+async def get_setting(chat_id: str, key: str, default=None):
+    doc = await collection.find_one({"chat_id": chat_id})
+    if doc:
+        return doc.get("settings", {}).get(key, default)
+    return default
 
 
-def set_setting(chat_id: str, key: str, value) -> None:
-    data = load()
-    user = _ensure_user(data, chat_id)
-    user["settings"][key] = value
-    save(data)
+async def set_setting(chat_id: str, key: str, value) -> None:
+    await collection.update_one(
+        {"chat_id": chat_id},
+        {"$set": {f"settings.{key}": value}},
+        upsert=True,
+    )

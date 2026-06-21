@@ -98,7 +98,7 @@ async def add_cmd(event):
     chat_id = str(event.chat_id)
     msg = await event.reply(f"Checking @{username}...")
     status, detail = await check_account(username)
-    update_account_status(chat_id, username, status.value)
+    await update_account_status(chat_id, username, status.value)
     text = (
         f"Added @{username} to monitoring.\n"
         f"{fmt_status(username, status.value, detail)}"
@@ -119,7 +119,7 @@ async def remove_cmd(event):
         return
     username = username.strip().lower()
     chat_id = str(event.chat_id)
-    if remove_account(chat_id, username):
+    if await remove_account(chat_id, username):
         await event.reply(f"Removed @{username}.", buttons=main_keyboard())
     else:
         await event.reply(
@@ -135,7 +135,7 @@ async def text_fallback(event):
     chat_id = str(event.chat_id)
     msg = await event.reply(f"Checking @{username}...")
     status, detail = await check_account(username)
-    update_account_status(chat_id, username, status.value)
+    await update_account_status(chat_id, username, status.value)
     text = (
         f"Added @{username} to monitoring.\n"
         f"{fmt_status(username, status.value, detail)}"
@@ -145,7 +145,7 @@ async def text_fallback(event):
 
 async def send_account_list(event, edit=False):
     chat_id = str(event.chat_id)
-    accounts = get_accounts(chat_id)
+    accounts = await get_accounts(chat_id)
     if not accounts:
         text = "No accounts being monitored.\nUse /add or tap Add Account below."
         buttons = main_keyboard()
@@ -164,8 +164,8 @@ async def send_account_list(event, edit=False):
 
 async def show_settings_panel(event):
     chat_id = str(event.chat_id)
-    interval = get_setting(chat_id, "interval", DEFAULT_INTERVAL)
-    notify = get_setting(chat_id, "notifications", True)
+    interval = await get_setting(chat_id, "interval", DEFAULT_INTERVAL)
+    notify = await get_setting(chat_id, "notifications", True)
     text = (
         "Settings\n\n"
         f"Check Interval: {interval} minutes\n"
@@ -199,7 +199,7 @@ async def callback_handler(event):
 
     elif action == CB_CHECK_ALL:
         await event.edit("Checking all accounts, please wait...")
-        accounts = get_accounts(chat_id)
+        accounts = await get_accounts(chat_id)
         if not accounts:
             await event.edit(
                 "No accounts to check.", buttons=main_keyboard()
@@ -208,7 +208,7 @@ async def callback_handler(event):
         results = []
         for username in list(accounts.keys()):
             status, detail = await check_account(username)
-            update_account_status(chat_id, username, status.value)
+            await update_account_status(chat_id, username, status.value)
             results.append(fmt_status(username, status.value, detail))
         await event.edit("\n\n".join(results), buttons=main_keyboard())
 
@@ -216,7 +216,7 @@ async def callback_handler(event):
         if not value:
             return
         status, detail = await check_account(value)
-        update_account_status(chat_id, value, status.value)
+        await update_account_status(chat_id, value, status.value)
         text = fmt_status(value, status.value, detail)
         await event.edit(text, buttons=account_actions_keyboard(value))
 
@@ -229,7 +229,7 @@ async def callback_handler(event):
     elif action == CB_CONFIRM_REMOVE:
         if not value:
             return
-        if remove_account(chat_id, value):
+        if await remove_account(chat_id, value):
             await event.edit(
                 f"Removed @{value}.", buttons=main_keyboard()
             )
@@ -246,18 +246,18 @@ async def callback_handler(event):
 
     elif action == CB_SET_INTERVAL:
         if value:
-            set_setting(chat_id, "interval", int(value))
+            await set_setting(chat_id, "interval", int(value))
             await show_settings_panel(event)
         else:
-            current = get_setting(chat_id, "interval", DEFAULT_INTERVAL)
+            current = await get_setting(chat_id, "interval", DEFAULT_INTERVAL)
             await event.edit(
                 "Select check interval:",
                 buttons=interval_picker_keyboard(current),
             )
 
     elif action == CB_TOGGLE_NOTIFY:
-        current = get_setting(chat_id, "notifications", True)
-        set_setting(chat_id, "notifications", not current)
+        current = await get_setting(chat_id, "notifications", True)
+        await set_setting(chat_id, "notifications", not current)
         await show_settings_panel(event)
 
 
@@ -266,7 +266,7 @@ async def periodic_check_loop():
     logger.info("Periodic checker started")
     while True:
         try:
-            data = load()
+            data = await load()
             for chat_id_str, user_data in data.items():
                 accounts = user_data.get("accounts", {})
                 for username, info in list(accounts.items()):
@@ -277,10 +277,10 @@ async def periodic_check_loop():
                     )
                     new_status, detail = await check_account(username)
                     if new_status.value != last_status:
-                        update_account_status(
+                        await update_account_status(
                             chat_id_str, username, new_status.value
                         )
-                        notify = get_setting(
+                        notify = await get_setting(
                             chat_id_str, "notifications", True
                         )
                         if not notify:
@@ -313,7 +313,7 @@ async def periodic_check_loop():
                                 f"Failed to notify {chat_id_str}"
                             )
             sleep_minutes = DEFAULT_INTERVAL
-            data = load()
+            data = await load()
             for ud in data.values():
                 ui = ud.get("settings", {}).get("interval")
                 if ui:
