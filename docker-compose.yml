@@ -16,6 +16,8 @@ services:
       - .env
     environment:
       - MONGODB_URI=mongodb://mongo:27017
+    volumes:
+      - ./insta_session.json:/app/insta_session.json
 
 volumes:
   mongo_data:
